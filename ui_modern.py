@@ -1,263 +1,199 @@
 import streamlit as st
 import random
 import time
+from style import get_modern_css
 from config import AVAILABLE_MODELS
-from processor import extract_text, generate_quiz_modern
+from processor import extract_text, generate_quiz_dynamic
 from db import save_quiz_to_db
 
-# --- 1. CSS MODERN (Clean & Animated) ---
-def inject_custom_css():
-    st.markdown("""
-    <style>
-        /* Import Font yang bersih (Inter) */
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-        
-        html, body, [class*="css"] {
-            font-family: 'Inter', sans-serif;
-        }
+def init_state():
+    defaults = {
+        'quiz_data': None,
+        'current_idx': 0,
+        'score': 0,
+        'answers_log': {},      # {idx: {'user_ans': 'A', 'is_correct': True}}
+        'shuffled_opts': {},    # {idx: [(index_asli, teks_opsi), ...]}
+        'app_mode': 'setup'     # setup | game | summary
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-        /* Container Card Utama */
-        .quiz-container {
-            background-color: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            padding: 32px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-            margin-bottom: 24px;
-            animation: fadeIn 0.5s ease-out;
-        }
+def get_options_shuffled(idx, options):
+    """Mengembalikan opsi yang sudah diacak dan konsisten"""
+    if idx not in st.session_state.shuffled_opts:
+        indexed = list(enumerate(options)) # [(0, 'Benar'), (1, 'Salah1')...]
+        random.shuffle(indexed)
+        st.session_state.shuffled_opts[idx] = indexed
+    return st.session_state.shuffled_opts[idx]
 
-        /* Dark Mode Support (Basic) */
-        @media (prefers-color-scheme: dark) {
-            .quiz-container {
-                background-color: #1f2937;
-                border-color: #374151;
-            }
-        }
-
-        /* Typography */
-        .question-text {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: #111827;
-            margin-bottom: 24px;
-        }
-        @media (prefers-color-scheme: dark) { .question-text { color: #f3f4f6; } }
-
-        /* Option Card Styling */
-        .option-card {
-            padding: 16px;
-            margin-bottom: 12px;
-            border-radius: 8px;
-            border: 1px solid #e5e7eb;
-            transition: all 0.2s ease;
-            cursor: default;
-        }
-        
-        /* State Colors */
-        .opt-neutral { background-color: transparent; }
-        
-        .opt-correct { 
-            background-color: #ecfdf5; 
-            border-color: #10b981; 
-            color: #065f46;
-        }
-        
-        .opt-wrong { 
-            background-color: #fef2f2; 
-            border-color: #ef4444; 
-            color: #991b1b;
-        }
-        
-        /* Explanation Box */
-        .rationale-text {
-            font-size: 0.9rem;
-            margin-top: 8px;
-            padding-top: 8px;
-            border-top: 1px dashed rgba(0,0,0,0.1);
-            opacity: 0.9;
-        }
-
-        /* Animation Keyframes */
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* Hide Streamlit default UI elements */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        .stRadio > label {display: none;} /* Sembunyikan label radio default */
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. LOGIC SHUFFLE ---
-def get_shuffled_data(q_index, options_list):
-    """
-    Mengacak opsi tapi tetap membawa data 'rationale' dan 'is_correct' nya.
-    """
-    if f"shuffle_{q_index}" not in st.session_state:
-        # options_list isinya: [{'text': '...', 'rationale': '...'}, ...]
-        # Index 0 adalah benar (dari processor).
-        
-        # Kita tandai dulu mana yang benar sebelum diacak
-        tagged_options = []
-        for i, opt in enumerate(options_list):
-            opt['is_correct'] = (i == 0) # Tandai True jika index 0
-            tagged_options.append(opt)
-            
-        random.shuffle(tagged_options)
-        st.session_state[f"shuffle_{q_index}"] = tagged_options
-        
-    return st.session_state[f"shuffle_{q_index}"]
-
-# --- 3. UI RENDERER ---
 def render_app_modern():
-    inject_custom_css()
-    
-    # Header Simple
-    st.markdown("### Quiz Generator")
-    st.markdown("---")
+    st.markdown(get_modern_css(), unsafe_allow_html=True)
+    init_state()
 
-    # State Init
-    if 'quiz_data' not in st.session_state:
-        render_input_section()
-    else:
-        render_quiz_section()
+    # Routing sederhana
+    if st.session_state.app_mode == 'setup':
+        render_setup()
+    elif st.session_state.app_mode == 'game':
+        render_game()
+    elif st.session_state.app_mode == 'summary':
+        render_summary()
 
-def render_input_section():
-    col1, col2 = st.columns([2, 1])
+def render_setup():
+    st.markdown("## Quiz Generator")
     
-    with col1:
-        input_type = st.radio("Input Source", ["Upload File", "Manual Text"], horizontal=True)
+    # Input Area
+    with st.container(border=True):
+        tab1, tab2 = st.tabs(["Upload", "Text"])
         context = ""
         topic = ""
         
-        if input_type == "Upload File":
-            f = st.file_uploader("Upload Document", type=["pdf", "pptx", "txt"], label_visibility="collapsed")
+        with tab1:
+            f = st.file_uploader("Source File", type=['pdf', 'txt', 'md'], label_visibility="collapsed")
             if f:
-                with st.spinner("Processing..."):
-                    context = extract_text(f)
-                    topic = f.name
-        else:
-            context = st.text_area("Paste content here", height=200)
-            topic = "Manual Input"
+                context = extract_text(f)
+                topic = f.name
+        with tab2:
+            txt = st.text_area("Paste Content", height=150, label_visibility="collapsed")
+            if txt:
+                context = txt
+                topic = "Manual Input"
 
+    # Config Area
+    col1, col2 = st.columns(2)
+    with col1:
+        model = st.selectbox("Engine", list(AVAILABLE_MODELS.keys()))
     with col2:
-        model_label = st.selectbox("Model", list(AVAILABLE_MODELS.keys()))
-        q_count = st.number_input("Question Count", min_value=1, value=10)
-        
-        st.write("") # Spacer
-        if st.button("Generate Quiz", type="primary", use_container_width=True):
-            if context:
-                with st.spinner("Generating..."):
-                    cfg = {"model_id": AVAILABLE_MODELS[model_label], "q_count": q_count}
-                    res = generate_quiz_modern(context, cfg)
-                    
-                    if "error" in res:
-                        st.error("Generation failed.")
-                    else:
-                        # Reset & Save
-                        st.session_state.quiz_data = res
-                        st.session_state.current_q = 0
-                        st.session_state.score = 0
-                        st.session_state.user_answers = {} 
-                        save_quiz_to_db(topic, "modern_ui", cfg, res)
-                        st.rerun()
+        count = st.number_input("Total Questions", min_value=1, value=5)
 
-def render_quiz_section():
+    if st.button("Start Session", type="primary", use_container_width=True):
+        if not context:
+            st.toast("Please provide content first.", icon="⚠️")
+            return
+            
+        with st.spinner("Analyzing content & generating questions..."):
+            cfg = {"model_id": AVAILABLE_MODELS[model], "q_count": count, "mode": "Modern Drill"}
+            res = generate_quiz_dynamic(context, cfg)
+            
+            if "error" in res:
+                st.error("Failed to generate quiz.")
+            else:
+                st.session_state.quiz_data = res
+                st.session_state.app_mode = 'game'
+                st.rerun()
+
+def render_game():
     data = st.session_state.quiz_data
-    curr = st.session_state.current_q
+    curr = st.session_state.current_idx
     total = len(data)
     
-    # Progress Bar Tipis
-    st.progress((curr + 1) / total)
+    # Progress Bar Minimalis
+    st.progress((curr) / total, text=f"Question {curr + 1} / {total}")
     
-    # Ambil Data Soal
-    question_data = data[curr]
-    question_text = question_data['question']
-    raw_options = question_data['options']
+    # Ambil soal
+    q = data[curr]
+    question_text = q.get('question', 'No question')
+    opts_raw = q.get('options', [])
+    shuffled = get_options_shuffled(curr, opts_raw)
     
-    # Acak Opsi
-    shuffled_opts = get_shuffled_data(curr, raw_options)
+    # --- QUESTION CARD (HTML Injection for Class) ---
+    st.markdown(f"""
+    <div class='animate-card question-card'>
+        <div class='question-meta'>Topic: Quiz Analysis</div>
+        <div class='question-text'>{question_text}</div>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # Container Soal (Putih bersih dengan shadow)
-    with st.container():
+    # --- INTERACTION AREA ---
+    # Cek apakah user sudah menjawab soal ini sebelumnya
+    has_answered = curr in st.session_state.answers_log
+    
+    # Form Container
+    placeholder = st.empty()
+    
+    if not has_answered:
+        with placeholder.form(key=f"q_form_{curr}"):
+            # Tampilkan opsi
+            display_opts = [txt for idx, txt in shuffled]
+            choice = st.radio("Select Answer:", display_opts, label_visibility="collapsed", key=f"radio_{curr}")
+            
+            if st.form_submit_button("Check Answer", use_container_width=True, type="primary"):
+                # Logic Cek Jawaban
+                selected_idx = -1
+                for idx, txt in shuffled:
+                    if txt == choice:
+                        selected_idx = idx
+                        break
+                
+                is_correct = (selected_idx == 0) # Asumsi index 0 selalu jawaban benar dr backend
+                
+                # Simpan log
+                st.session_state.answers_log[curr] = {
+                    'user_ans': choice,
+                    'is_correct': is_correct,
+                    'correct_txt': opts_raw[0]
+                }
+                
+                if is_correct: st.session_state.score += 1
+                st.rerun() # Refresh untuk memunculkan tampilan 'Answered'
+                
+    else:
+        # --- RESULT VIEW (TAMPIL SETELAH JAWAB) ---
+        log = st.session_state.answers_log[curr]
+        explanation = q.get('explanation', 'No explanation provided.')
+        
+        # 1. Status Card (Feedback Langsung)
+        if log['is_correct']:
+            st.markdown(f"""
+            <div class='result-container animate-card status-card-correct'>
+                <span>✅</span> Correct Answer
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class='result-container animate-card'>
+                <div class='status-card-wrong'>
+                    <span>❌</span> Incorrect.
+                </div>
+                <div style='background: #1e232e; padding: 12px; border-radius: 8px; border: 1px solid #da3633; color: #fff;'>
+                    <small style='color: #8b949e'>Correct Answer:</small><br>
+                    {log['correct_txt']}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        # 2. Explanation Card (Terpisah)
         st.markdown(f"""
-        <div class="quiz-container">
-            <div class="question-text">{curr + 1}. {question_text}</div>
+        <div class='result-container animate-card' style='animation-delay: 0.1s'>
+            <div class='explanation-card'>
+                <strong style='color: #58a6ff; display: block; margin-bottom: 8px;'>Why is this correct?</strong>
+                {explanation}
+            </div>
         </div>
         """, unsafe_allow_html=True)
         
-        # FORM JAWABAN
-        # Kita pakai st.radio tapi di-styling biar kayak list group
-        display_texts = [opt['text'] for opt in shuffled_opts]
-        
-        # Cek apakah user sudah jawab soal ini?
-        has_answered = f"ans_{curr}" in st.session_state.user_answers
-        user_selection = st.session_state.user_answers.get(f"ans_{curr}", None)
-        
-        if not has_answered:
-            # --- MODE BELUM JAWAB ---
-            with st.form(key=f"q_form_{curr}"):
-                choice = st.radio("Options", display_texts, label_visibility="collapsed")
-                submit = st.form_submit_button("Check Answer", use_container_width=True)
-                
-                if submit:
-                    st.session_state.user_answers[f"ans_{curr}"] = choice
+        # Navigation
+        col_nav = st.columns([3, 1])
+        with col_nav[1]:
+            if curr < total - 1:
+                if st.button("Next ❯", type="primary"):
+                    st.session_state.current_idx += 1
                     st.rerun()
-        else:
-            # --- MODE SUDAH JAWAB (SHOW EXPLANATION CARDS) ---
-            
-            # 1. Tampilkan setiap opsi sebagai KARTU individual
-            for opt in shuffled_opts:
-                text = opt['text']
-                rationale = opt['rationale']
-                is_correct = opt['is_correct']
-                is_selected = (text == user_selection)
-                
-                # Tentukan Style CSS berdasarkan status
-                css_class = "opt-neutral"
-                status_icon = ""
-                
-                if is_correct:
-                    css_class = "opt-correct"
-                    status_icon = "Correct"
-                elif is_selected and not is_correct:
-                    css_class = "opt-wrong"
-                    status_icon = "Your Answer"
-                elif not is_selected and not is_correct:
-                    # Opsi salah yang tidak dipilih, buat transparan/abu
-                    css_class = "option-card" # Default style (grey border)
-                
-                # Render Kartu HTML
-                # Hanya tampilkan penjelasan jika opsi itu BENAR atau DIPILIH SALAH
-                show_rationale = is_correct or is_selected
-                
-                rationale_html = ""
-                if show_rationale:
-                    rationale_html = f"<div class='rationale-text'><b>Analysis:</b> {rationale}</div>"
-                
-                # Highlight visual biar jelas mana yang dipilih user
-                border_style = "2px solid #000" if is_selected else "1px solid #e5e7eb"
-                if is_correct: border_style = "1px solid #10b981"
-                if is_selected and not is_correct: border_style = "1px solid #ef4444"
+            else:
+                if st.button("Finish", type="primary"):
+                    st.session_state.app_mode = 'summary'
+                    st.rerun()
 
-                st.markdown(f"""
-                <div class="{css_class} option-card" style="border: {border_style}">
-                    <div style="font-weight: 500;">{text}</div>
-                    {rationale_html}
-                </div>
-                """, unsafe_allow_html=True)
-
-            # Tombol Navigasi
-            col_nav1, col_nav2 = st.columns([3, 1])
-            with col_nav2:
-                if curr < total - 1:
-                    if st.button("Next Question", type="primary"):
-                        st.session_state.current_q += 1
-                        st.rerun()
-                else:
-                    if st.button("Finish Quiz"):
-                        st.session_state.quiz_data = None # Reset
-                        st.rerun()
+def render_summary():
+    score = st.session_state.score
+    total = len(st.session_state.quiz_data)
+    
+    st.markdown("<div class='animate-card question-card' style='text-align:center'>", unsafe_allow_html=True)
+    st.subheader("Session Complete")
+    st.metric("Final Score", f"{score}/{total}")
+    
+    if st.button("Start New Session", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
